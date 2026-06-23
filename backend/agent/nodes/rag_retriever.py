@@ -15,6 +15,7 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 
 from backend.agent.state import AgentState, RetrievedDoc
 from backend.config import settings
+from backend.rag import retriever
 
 logger = logging.getLogger(__name__)
 
@@ -76,103 +77,9 @@ class RAGRetrieverNode:
             logger.warning(f"[RAG] 查询改写失败：{e}， 使用原始问题")
             return [question]
 
-    def _deduplicate_docs(self, docs: list[Document]) -> list[Document]:
-        """去重：相同 chunk_id 或高度相似内容只保留一个"""
-        seen_ids = set()
-        seen_content = set()
-        result = []
-        for doc in docs:
-            chunk_id = doc.metadata.get("chunk_id", "")
-            # 用前100字符粗略去重
-            content_key = doc.page_content[:100].strip()
-            if chunk_id in seen_ids and content_key in seen_content:
-                continue
-            seen_ids.add(chunk_id)
-            seen_content.add(content_key)
-            result.append(doc)
-
-        return result
-
-    def _filter_by_score(
-            self, docs_with_scores: list[tuple[Document, float]]
-    ) -> list[tuple[Document, float]]:
-        """按相关性分数过滤低质量文档"""
-        return [
-            (doc, score)
-            for doc, score in docs_with_scores
-            if score >= self.score_threshold
-        ]
-
-    async def _rerank(
-            self,
-            query: str,
-            docs_with_scores: list[tuple[Document, float]],
-    ) -> list[tuple[Document, float]]:
-        """
-        LLM Reranker：对候选文档重新打分排序
-        轻量版：让 LLM 对每个文档打相关性分 0-10
-        """
-        if len(docs_with_scores) <= 1:
-            return docs_with_scores
-
-        try:
-            doc_texts = "\n---\n".join([
-                f"[文档{i+1}] 来源：{doc.metadata.get('source', '未知来源')}\n"
-                f"内容：{doc.page_content[:300]}"
-                for i, (doc, _) in enumerate(docs_with_scores)
-            ])
-
-            rerank_prompt = f"""
-            请对以下文档与问题的相关性打分（0-10整数）。
-            问题：{query}
-
-            {doc_texts}
-            
-            按顺序输出每个文档的分数，格式：
-            文档1: <分数>
-            文档2: <分数>
-            """
-
-            response = await self.llm.ainvoke([
-                HumanMessage(content=rerank_prompt)
-            ])
-
-            # 解析分数
-            import re
-            scores_raw = re.findall(r'文档\d+:\s*(\d+)', response.content)
-            if len(scores_raw) == len(docs_with_scores):
-                reranked_scores = [float(s) / 10.0 for s in scores_raw]
-                # 重组并排序
-                reranked = [
-                    (doc, reranked_scores[i])
-                    for i, (doc, _) in enumerate(docs_with_scores)
-                ]
-                return sorted(reranked, key=lambda x:x[1], reverse=True)
-
-        except Exception as e:
-            logger.warning(f"[RAG] Rerank失败：{e}， 使用原始排序")
-
-        return docs_with_scores
-
-    def _format_context(self, docs_with_scores: list[tuple[Document, float]]) -> str:
-        """将检索文档格式化为 Prompt 可用的上下文文本"""
-        if not docs_with_scores:
-            return "暂无相关文档"
-
-        parts = []
-        for i, (doc, score) in enumerate(docs_with_scores, 1):
-            source = doc.metadata.get("source", "未知来源")
-            chunk_id = doc.metadata.get("chunk_id", f"chunk_{i}")
-            parts.append(
-                f"【参考文档 {i}】\n"
-                f"来源：{source}（相关度：{score:.2f}）\n"
-                f"内容：{doc.page_content}\n"
-            )
-
-        return "\n".join(parts)
-
     async def run(self, state: AgentState) -> dict:
         user_input = state["user_input"]
+        collection = state.get("collection", "default")     # 可从 state 传入
         start_time = time.time()
 
         logger.info(f"[RAG] session={state['session_id']} query={user_input[:50]}")
@@ -182,63 +89,53 @@ class RAGRetrieverNode:
         logger.info(f"[RAG] rewritten queries: {queries}")
 
         # 2. 多查询并行检索 + 合并
-        all_docs_with_scores: list[tuple[Document, float]] = []
-        for query in queries:
-            try:
-                results = self.vectorstore.similarity_search_with_relevance_scores(
-                    query,
-                    k=self.top_k,
-                )
-                all_docs_with_scores.extend(results)
+        import asyncio
+        results_list = await asyncio.gather(*[
+            retriever.retrieve(q, collection=collection)
+            for q in queries
+        ])
 
-            except Exception as e:
-                logger.warning(f"[RAG] 检索失败 query={query}: {e}")
+        # 3. 合并 & 去重
+        seen = set()
+        combined = []
+        for results in results_list:
+            for doc, score in results:
+                key = doc.page_content[:80]
+                if key not in seen:
+                    seen.add(key)
+                    combined.append((doc, score))
 
-        # 3. 去重
-        docs = self._deduplicate_docs([d for d, _ in all_docs_with_scores])
-        # 重组 (doc, score) 保持去重后的一致性
-        seen = {d.page_content[:100] for d in docs}
-        deduped = [
-            (d, s)
-            for d, s in all_docs_with_scores
-            if d.page_content[:100] not in seen
-        ]
-        # 再次去重（可能有重复 key）
-        seen_check = set()
-        unique_docs = []
-        for d, s in deduped:
-            key = d.page_content[:100]
-            if key not in seen_check:
-                seen_check.add(key)
-                unique_docs.append((d, s))
+        # 4. 按分数排序，取Top-K
+        combined.sort(key=lambda x: x[1], reverse=True)
+        final = combined[: settings.rag.top_k]
 
-        # 4. 相关性过滤
-        filtered = self._filter_by_score(unique_docs)
-
-        # 5. Rerank
-        reranked = await self._rerank(user_input, filtered)
-        # 取 Top-K
-        final_docs = reranked[:self.top_k]
-
-        # 6. 格式化
-        rag_context = self._format_context(final_docs)
-
-        # 7. 组装 RetrievedDoc 列表
+        # 5. 格式化输出
         retrieved_docs: list[RetrievedDoc] = [
             RetrievedDoc(
                 content=doc.page_content,
                 source=doc.metadata.get("source", "未知来源"),
                 score=float(score),
-                chunk_id=doc.metadata.get("chunk_id", f"chunk_{i}"),
+                chunk_id=doc.metadata.get("chunk_id", ""),
                 metadata=doc.metadata,
             )
-            for i, (doc, score) in enumerate(final_docs)
+            for doc, score in final
         ]
 
-        elapsed_ms = (time.time() - start_time) *  (1000.0)
+        # 6. 构建RAG上下文文本
+        if final:
+            parts = [
+                f"【参考文档{i}】来源：{doc.metadata.get('source', '未知来源')}"
+                f"（相关度：{score:.2f}） \n {doc.page_content}"
+                for i, (doc, score) in enumerate(final, 1)
+            ]
+            rag_context = "\n\n---\n\n".join(parts)
+        else:
+            rag_context = "未找到相关结果，建议换用其他关键词"
+
+        elapsed = (time.time() - start_time) * 1000
         logger.info(
-            f"[RAG] 完成检索: retrieved={len(retrieved_docs)} "
-            f"elapsed={elapsed_ms:.1f}ms"
+            f"[RAGNode] 完成：docs={len(retrieved_docs)}"
+            f"elapsed={elapsed:.2f}ms"
         )
 
         return {
