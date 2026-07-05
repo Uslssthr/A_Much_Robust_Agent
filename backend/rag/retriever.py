@@ -23,10 +23,10 @@ class RAGRetriever:
         self.top_k = cfg.top_k
         self.score_threshold = cfg.score_threshold
         self.chroma_dir = cfg.chroma_dir
-        self.embeddings = OpenAIEmbeddings(
-            model = cfg.embedding_model,
-            api_key=settings.llm.api_key,
-            base_url=settings.llm.base_url,
+        self.embeddings = embeddings = OpenAIEmbeddings(
+            model=cfg.embedding_model,
+            base_url=cfg.base_url,
+            api_key=""
         )
 
     def _get_vectorstore(self, collection: str = "default") -> Chroma:

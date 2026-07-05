@@ -21,74 +21,74 @@ logger = logging.getLogger(__name__)
 INIT_SQL = """
 -- 会话表
 CREATE TABLE IF NOT EXISTS sessions (
-    session_id          TEXT PRIMARY KEY,
-    user_id             TEXT NOT NULL DEFAULT 'anonymous',
-    title               TEXT,
-    summary             TEXT,
-    route_stats         TEXT DEFAULT '{}',          -- JSON: {react:N, rag:N, direct:N}
-    message_count       INTEGER NOT NULL DEFAULT 0,
-    token_total         INTEGER NOT NULL DEFAULT 0,
-    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at           DATETIME DEFAULT CURRENT_TIMESTAMP
+    session_id    TEXT PRIMARY KEY,
+    user_id       TEXT NOT NULL DEFAULT 'anonymous',
+    title         TEXT,
+    summary       TEXT,
+    route_stats   TEXT DEFAULT '{}',      -- JSON: {react:N, rag:N, direct:N}
+    message_count INTEGER NOT NULL DEFAULT 0,
+    token_total   INTEGER NOT NULL DEFAULT 0,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 消息快照表（LangGraph checkpointer 之外的业务备份）
 CREATE TABLE IF NOT EXISTS messages (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id          TEXT NOT NULL REFERENCES sessions(session_id),
-    role                TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'system')),
-    content             TEXT NOT NULL,
-    tool_name           TEXT,
-    tool_input          TEXT,                       -- JSON
-    token_count         INTEGER DEFAULT 0,
-    created_at           DATETIME DEFAULT CURRENT_TIMESTAMP,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT NOT NULL REFERENCES sessions(session_id),
+    role          TEXT NOT NULL CHECK(role IN ('user','assistant','tool','system')),
+    content       TEXT NOT NULL,
+    tool_name     TEXT,
+    tool_input    TEXT,                   -- JSON
+    token_count   INTEGER DEFAULT 0,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 知识库文档元数据表
 CREATE TABLE IF NOT EXISTS kb_documents (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    doc_id              TEXT NOT NULL UNIQUE,       -- uuid
-    filename            TEXT NOT NULL,
-    file_type           TEXT NOT NULL,              -- pdf/md/txt/docx
-    file_size           INTEGER DEFAULT 0,          -- bytes
-    chunk_count         INTEGER DEFAULT 0,
-    status              TEXT NOT NULL DEFAULT 'processing'
-                            CHECK(status IN ('processing', 'active', 'failed', 'deleted))
-    error_msg           TEXT,
-    collection          TEXT NOT NULL DEFAULT 'default',
-    uploaded_by         TEXT NOT NULL DEFAULT 'anonymous',
-    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    doc_id        TEXT NOT NULL UNIQUE,   -- uuid
+    filename      TEXT NOT NULL,
+    file_type     TEXT NOT NULL,          -- pdf/md/txt/docx
+    file_size     INTEGER DEFAULT 0,      -- bytes
+    chunk_count   INTEGER DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'processing'
+                      CHECK(status IN ('processing','active','failed','deleted')),
+    error_msg     TEXT,
+    collection    TEXT NOT NULL DEFAULT 'default',
+    uploaded_by   TEXT DEFAULT 'anonymous',
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 长期记忆表
 CREATE TABLE IF NOT EXISTS long_term_memory (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id             TEXT NOT NULL,
-    session_id          TEXT NOT NULL,
-    memory_type         TEXT NOT NULL
-                            CHECK(memory_type IN ('preference', 'fact', 'decision', 'summary')),
-    content             TEXT NOT NULL,
-    importance          REAL NOT NULL DEFAULT 0.8
-                            CHECK(importance BETWEEN 0.0 AND 1.0),
-    access_count        INTEGER NOT NULL DEFAULT 0,
-    last_access         DATETIME,
-    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id       TEXT NOT NULL,
+    session_id    TEXT NOT NULL,
+    memory_type   TEXT NOT NULL
+                      CHECK(memory_type IN ('preference','fact','decision','summary')),
+    content       TEXT NOT NULL,
+    importance    REAL NOT NULL DEFAULT 0.8
+                      CHECK(importance BETWEEN 0.0 AND 1.0),
+    access_count  INTEGER NOT NULL DEFAULT 0,
+    last_access   DATETIME,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
 -- 工具调用日志表
 CREATE TABLE IF NOT EXISTS tool_call_logs (
-    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id          TEXT NOT NULL,
-    tool_name           TEXT NOT NULL,
-    tool_input          TEXT,                       -- JSON
-    tool_output         TEXT,
-    error               TEXT,
-    elapsed_ms          REAL,
-    created_at          DATETIME DEFAULT CURRENT_TIMESTAMP,
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id    TEXT NOT NULL,
+    tool_name     TEXT NOT NULL,
+    tool_input    TEXT,                   -- JSON
+    tool_output   TEXT,
+    error         TEXT,
+    elapsed_ms    REAL,
+    created_at    DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
--- 索引创建
+-- ── 索引 ────────────────────────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, created_at);
 
@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS idx_kb_docs_status
 CREATE INDEX IF NOT EXISTS idx_ltm_user
     ON long_term_memory(user_id, importance DESC, last_access DESC);
 
-CREATE INDEX IF NOT EXISTS idx_tool_call_logs_session
+CREATE INDEX IF NOT EXISTS idx_tool_logs_session
     ON tool_call_logs(session_id, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user
@@ -167,7 +167,7 @@ class SQLiteManager:
             conn.execute("""
                 INSERT INTO sessions (session_id, user_id, title, message_count)
                 VALUES (?, ?, ?, ?)
-                ON CONFLICT(session_id) DO UPDATE
+                ON CONFLICT(session_id) DO UPDATE SET
                     message_count = message_count + excluded.message_count,
                     updated_at = CURRENT_TIMESTAMP
             """, (

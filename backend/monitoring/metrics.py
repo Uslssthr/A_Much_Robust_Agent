@@ -32,6 +32,12 @@ agent_requests_total = Counter(
     ["route", "status"],
 )
 
+agent_iterations = Histogram(
+    "agent_react_iterations",
+    "ReAct 迭代次数分布",
+    buckets=[1, 2, 3, 4, 5, 6, 8, 10],
+)
+
 active_sessions = Gauge(
     "agent_active_sessions",
     "当前活跃会话数",

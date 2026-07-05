@@ -1,3 +1,4 @@
+from __future__ import annotations
 from enum import Enum
 from typing import TypedDict, Any, Optional, Annotated, Sequence
 
@@ -70,6 +71,7 @@ class AgentState(TypedDict):
     route:  RouteType
 
     # RAG检索
+    collection:         str                     # 知识库集合名称
     retrieved_docs:     list[RetrievedDoc]      # 检索到的文档列表
     rag_context:        Optional[str]           # 格式化后的 RAG 上下文文本
 

@@ -15,7 +15,8 @@ from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 
 from backend.agent.state import AgentState, RetrievedDoc
 from backend.config import settings
-from backend.rag import retriever
+from backend.monitoring.metrics import rag_retrieval_duration, rag_retrieved_docs
+from backend.rag.retriever import rag_retriever
 
 logger = logging.getLogger(__name__)
 
@@ -82,16 +83,16 @@ class RAGRetrieverNode:
         collection = state.get("collection", "default")     # 可从 state 传入
         start_time = time.time()
 
-        logger.info(f"[RAG] session={state['session_id']} query={user_input[:50]}")
+        logger.info(f"[RAGNode] session={state['session_id']} query={user_input[:50]}")
 
         # 1. 查询改写（Multi-Query）
         queries = await self._rewrite_query(user_input)
-        logger.info(f"[RAG] rewritten queries: {queries}")
+        logger.info(f"[RAGNode] rewritten queries: {queries}")
 
         # 2. 多查询并行检索 + 合并
         import asyncio
         results_list = await asyncio.gather(*[
-            retriever.retrieve(q, collection=collection)
+            rag_retriever.retrieve(q, collection=collection)
             for q in queries
         ])
 
@@ -108,6 +109,11 @@ class RAGRetrieverNode:
         # 4. 按分数排序，取Top-K
         combined.sort(key=lambda x: x[1], reverse=True)
         final = combined[: settings.rag.top_k]
+
+        # 4.5 上报RAG指标
+        elapsed = time.time() - start_time
+        rag_retrieval_duration.observe(elapsed)
+        rag_retrieved_docs.observe(len(final))
 
         # 5. 格式化输出
         retrieved_docs: list[RetrievedDoc] = [

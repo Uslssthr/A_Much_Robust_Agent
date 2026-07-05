@@ -20,6 +20,7 @@ from langchain_core.tools import BaseTool
 
 from backend.agent.state import AgentState, ToolCall
 from backend.config import settings
+from backend.monitoring.metrics import tool_calls_total, tool_duration
 from backend.tools.registry import get_tool_by_name
 
 logger = logging.getLogger(__name__)
@@ -39,6 +40,8 @@ class ToolExecutorNode:
         执行工具，带超时控制
         返回: (output_str, error_str_or_None)
         """
+        start_time = time.time()
+        status = "success"
         try:
             # 带超时的异步执行
             if hasattr(tool, 'arun'):
@@ -61,14 +64,21 @@ class ToolExecutorNode:
             return json.dumps(result, ensure_ascii=False, indent=2), None
 
         except asyncio.TimeoutError:
+            status = "timeout"
             err = f"工具 {tool.name} 执行超时（>{self.timeout}s）"
             logger.error(f"[ToolExecutorNode] {err}")
             return "", err
 
         except Exception as e:
+            status = "error"
             err = f"工具 {tool.name} 执行失败: {type(e).__name__}: {str(e)}"
             logger.error(f"[ToolExecutorNode] {err}", exc_info=True)
             return "", err
+        finally:
+            # 上报工具调用指标
+            elapsed = time.time() - start_time
+            tool_calls_total.labels(tool=tool.name, status=status).inc()
+            tool_duration.labels(tool=tool.name).observe(elapsed)
 
     async def run(self, state: AgentState) -> dict:
         pending = state.get("pending_tool")

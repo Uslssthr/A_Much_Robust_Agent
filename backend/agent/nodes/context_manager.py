@@ -19,6 +19,7 @@ from langchain_openai import ChatOpenAI
 from backend.agent.prompts import SUMMARIZATION_PROMPT
 from backend.agent.state import AgentState
 from backend.config import settings
+from backend.monitoring.metrics import context_token_count, context_compressions_total
 
 logger = logging.getLogger(__name__)
 
@@ -174,6 +175,9 @@ class ContextManagerNode:
             f"thresholds=({self.soft_limit}/{self.hard_limit}/{self.max_limit})"
         )
 
+        # 记录压缩前的token分布
+        context_token_count.observe(token_count)
+
         summary = state.get("context_summary")
         overflow = False
 
@@ -194,6 +198,12 @@ class ContextManagerNode:
         else:
             # Focus 折叠（强制）
             messages, strategy, summary = await self._focus_fold(messages)
+            overflow = True
+
+        # 上报压缩策略指标（none 不上报，只关心真正发生压缩的情况）
+        if strategy != "none":
+            context_compressions_total.labels(strategy=strategy).inc()
+            logger.info(f"[ContextManager] 压缩触发：strategy={strategy}")
 
         new_token_count = self._count_tokens(messages)
 

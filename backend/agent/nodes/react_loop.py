@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.tools import BaseTool
@@ -18,6 +19,7 @@ from langchain_openai import ChatOpenAI
 from backend.agent.prompts import DIRECT_ANSWER_PROMPT, RAG_SYNTHESIS_PROMPT, REACT_PROMPT
 from backend.agent.state import AgentState, ToolCall, RouteType
 from backend.config import settings
+from backend.monitoring.metrics import llm_call_duration, llm_tokens_total, agent_iterations
 
 from backend.tools.registry import get_all_tools, format_tool_description
 
@@ -82,12 +84,19 @@ class ReActLoopNode:
     async def _direct_answer(self, state: AgentState) -> dict:
         """直接回答（不需要工具）"""
         chain = DIRECT_ANSWER_PROMPT | self.llm_no_tools
+        start_time = time.time()
         response = await chain.ainvoke({
             "messages": list(state["messages"]),
             "user_input": state["user_input"],
             "long_term_memory": state.get("long_term_memory") or "暂无",
             "context_summary": state.get("context_summary") or "",
         })
+        llm_elapsed = time.time() - start_time
+
+        # 指标上报
+        llm_call_duration.labels(model=settings.llm.model).observe(llm_elapsed)
+        agent_iterations.observe(1)         # direct 路由只有 1 次 LLM 调用
+
         return {
             "messages":[
                 HumanMessage(content=state["user_input"]),
@@ -104,6 +113,7 @@ class ReActLoopNode:
             return await self._direct_answer(state)
 
         chain = RAG_SYNTHESIS_PROMPT | self.llm_no_tools
+        start_time = time.time()
         response = await chain.ainvoke({
             "messages": list(state["messages"]),
             "user_input": state["user_input"],
@@ -111,6 +121,12 @@ class ReActLoopNode:
             "long_term_memory": state.get("long_term_memory") or "暂无",
             "context_summary": state.get("context_summary") or "",
         })
+        llm_elapsed = time.time() - start_time
+
+        # 指标上报
+        llm_call_duration.labels(model=settings.llm.model).observe(llm_elapsed)
+        agent_iterations.observe(1)         # RAG 检索路由只有 1 次 LLM 调用
+
         return {
             "messages": [
                 HumanMessage(content=state["user_input"]),
@@ -139,11 +155,29 @@ class ReActLoopNode:
             }
 
         chain = REACT_PROMPT | self.llm
+
+        start_time = time.time()
         response = await chain.ainvoke(self._build_react_prompt_vars(state))
+        llm_elapsed = time.time() - start_time
+
+        # 上报LLM推理时间
+        llm_call_duration.labels(models=settings.llm.model).observe(llm_elapsed)
+
+        # 上报Token用量（LangChain 的 usage_metadata）
+        if hasattr(response, "usage_metadata") and response.usage_metadata:
+            usage = response.usage_metadata
+            llm_tokens_total.labels(
+                model=settings.llm.model, type="input"
+            ).inc(usage.get("input_tokens", 0))
+            llm_tokens_total.labels(
+                model=settings.llm.model, type="output"
+            ).inc(usage.get("output_tokens", 0))
+
 
         logger.info(
             f"[ReAct] iteration={iteration} "
             f"has_tool_calls={bool(response.tool_calls)}"
+            f" llm_elapsed={llm_elapsed * 1000:.4f} ms"
         )
 
         # 情况1：LLM 决定调用工具
@@ -172,6 +206,9 @@ class ReActLoopNode:
 
         # 情况2：LLM 直接给出最终答案
         else:
+            # 在最终回答时上报总迭代次数
+            agent_iterations.observe(iteration + 1)
+
             logger.info(f"[ReAct] 直接给出答案，content长度={len(response.content)}")
             return {
                 "messages": [
