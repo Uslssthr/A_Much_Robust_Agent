@@ -7,7 +7,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -16,6 +16,8 @@ from backend.agent.graph import build_agent_graph_with_checkpointer
 from backend.config import settings
 from backend.db.sqlite_manager import db
 from backend.middleware.logging_middleware import RequestLoggingMiddleware
+from backend.monitoring.metrics import get_metrics
+from backend.mq.redis_client import redis_client
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -45,7 +47,14 @@ async def lifespan(app: FastAPI):
     db.initialize()
     logger.info("✅ 数据库初始化完成")
 
-    # 3. 初始化AsyncSqliteSaver + 编译Agent Graph
+    # 3. 连接Redis
+    try:
+        await redis_client.connect()
+        logger.info("✅ Redis 连接成功")
+    except Exception as e:
+        logger.warning(f"⚠️  Redis 连接失败（异步任务将不可用）: {e}")
+
+    # 4. 初始化AsyncSqliteSaver + 编译Agent Graph
     db_path = settings.db.sqlite_path
     async with AsyncSqliteSaver.from_conn_string(db_path) as checkpointer:
         app.state.agent_graph = build_agent_graph_with_checkpointer(checkpointer)
@@ -57,6 +66,7 @@ async def lifespan(app: FastAPI):
 
 
     # 关闭
+    await redis_client.disconnect()
     logger.info("🔴 服务关闭，资源已释放")
 
 
@@ -82,6 +92,11 @@ app.add_middleware(
 )
 app.add_middleware(RequestLoggingMiddleware)
 
+app.get("/metrics")
+async def metrics():
+    """Prometheus 抓取端点"""
+    data, content_type = get_metrics()
+    return Response(content=data, media_type=content_type)
 
 # 全局异常处理
 @app.exception_handler(Exception)
@@ -97,10 +112,12 @@ async def global_exception_handler(request: Request, exc: Exception):
 from backend.api.chat import router as chat_router
 from backend.api.knowledge import router as knowledge_router
 from backend.api.health import router as health_router
+from backend.api.task import router as task_router
 
 app.include_router(chat_router)
 app.include_router(knowledge_router)
 app.include_router(health_router)
+app.include_router(task_router)
 
 
 # 启动入口

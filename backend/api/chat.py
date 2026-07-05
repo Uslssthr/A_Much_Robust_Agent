@@ -21,7 +21,13 @@ from pydantic import BaseModel, Field
 from backend.agent.state import create_initial_state
 from backend.db.sqlite_manager import db
 from backend.memory.long_term import long_term_memory
+from backend.mq.redis_client import redis_client
+from backend.mq.task_producer import task_producer
 from backend.security.input_filter import InputSafetyFilter, SafetyResult
+from backend.monitoring.metrics import (
+    agent_requests_total, route_distribution,
+    safety_blocks_total, active_sessions,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/chat", tags=["Chat"])
@@ -93,9 +99,25 @@ async def chat(req: ChatRequest, request: Request):
       data: {"type":"meta","session_id":"...","route":"...",...}\n\n
       data: {"type":"done","session_id":"..."}\n\n
     """
+    # 0. 速率限制
+    try:
+        allowed, remaining = await redis_client.check_rate_limit(
+            req.user_id, max_requests=30, window_size=60
+        )
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="请求过于频繁，请稍后再试",
+            )
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
     # 1. 安全检查
     safety_result = safety.check(req.message)
     if not safety_result.passed:
+        safety_blocks_total.labels(risk_level=safety_result.risk_level).inc()
         raise HTTPException(
             status_code=400,
             detail={
@@ -107,6 +129,8 @@ async def chat(req: ChatRequest, request: Request):
     session_id = req.session_id or str(uuid.uuid4())
     agent = request.app.state.agent_graph
     config = {"configurable": {"thread_id": session_id}}
+
+    active_sessions.inc()       # 活跃会话 +1
 
     # 2. 确保会话存在
     db.upsert_session(
@@ -198,11 +222,15 @@ async def chat(req: ChatRequest, request: Request):
             logger.error(f"[Chat] 流式生成异常：{e}", exc_info=True)
             yield _sse_error(f"生成过程中发生错误：{str(e)[:100]}")
             return
+        finally:
+            active_sessions.dec()           # 活跃会话 -1
 
         # 流结束后的后处理
 
         answer = "".join(full_answer) or final_state.get("final_answer", "")
         route = str(final_state.get("route", "unknown"))
+        route_distribution.labels(route=route).inc()
+        agent_requests_total.labels(route=route, status="success").inc()
 
         # 发送元数据帧
         yield _sse_meta(
@@ -233,14 +261,15 @@ async def chat(req: ChatRequest, request: Request):
             )
 
         # 提取长期记忆（异步，不阻塞响应）
-        asyncio.create_task(
-            _extract_and_save_memory(
+        try:
+            await task_producer.submit_memory_extract(
                 user_id=req.user_id,
                 session_id=session_id,
                 user_input=req.message,
                 assistant_response=answer,
             )
-        )
+        except Exception as e:
+            logger.warning(f"[Chat] 记忆提取任务提交失败: {e}")
 
         yield _sse_done(session_id)
 
@@ -278,9 +307,9 @@ async def chat_sync(req: ChatRequest, request: Request):
     result = await agent.ainvoke(init_state, config=config)
 
     answer = result.get("final_answer", "")
+    db.upsert_session(session_id, req.user_id, message_count=2)
     db.save_message(session_id, "user", req.message)
     db.save_message(session_id, "assistant", answer)
-    db.upsert_session(session_id, req.user_id, message_count=2)
 
     return ChatResponse(
         session_id=session_id,

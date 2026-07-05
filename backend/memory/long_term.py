@@ -56,7 +56,7 @@ class LongTermMemory:
                 updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
             );
             
-            CREATE TABLE IF NOT EXISTS idx_ltm_user_type
+            CREATE INDEX IF NOT EXISTS idx_ltm_user_type
                 ON long_term_memory (user_id, memory_type, importance DESC);
                 
             CREATE INDEX IF NOT EXISTS idx_sessions_user

@@ -21,7 +21,6 @@ from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from multipart import file_path
 
 from backend.config import settings
 from backend.db.sqlite_manager import db
@@ -50,10 +49,10 @@ class IngestionPipeline:
             separators=["\n\n", "\n", "。", "！", "？", "；", " ", ""],
             length_function=len,
         )
-        self.embeddings = OpenAIEmbeddings(
+        self.embeddings = embeddings = OpenAIEmbeddings(
             model=cfg.embedding_model,
-            api_key=settings.llm.api_key,
-            base_url=settings.llm.base_url,
+            base_url=cfg.base_url,
+            api_key="",
         )
         self.chroma_dir = cfg.chroma_dir
         os.makedirs(self.chroma_dir, exist_ok=True)

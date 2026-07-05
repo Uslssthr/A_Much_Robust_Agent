@@ -43,7 +43,8 @@ class RAGConfig:
     score_threshold: float = 0.3                # 相关性阈值
     chunk_size: int = 512
     chunk_overlap: int = 64
-    embedding_model: str = "text-embedding-3-small"
+    embedding_model: str = "BGE-M3"
+    base_url: str = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1"
     chroma_dir: str = os.getenv("CHROMA_DIR", "./data/chroma")
 
 @dataclass
