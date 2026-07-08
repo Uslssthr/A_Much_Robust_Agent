@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 import unicodedata
+from langchain_core.runnables import RunnableConfig
 
 from backend.agent.state import SafetyLevel, AgentState
 from backend.config import settings
@@ -131,7 +132,7 @@ class SafetyCheckNode:
 
         return True, "", SafetyLevel.NONE
 
-    async def run(self, state: AgentState) -> dict:
+    async def run(self, state: AgentState, config: RunnableConfig | None = None) -> dict:
         """节点入口：执行所有安全检查"""
         user_input = state["user_input"]
         logger.info(f"[SafetyCheck] session={state['session_id']} input_len={len(user_input)}")
@@ -168,6 +169,6 @@ class SafetyCheckNode:
 # 节点实例（全局单例，供 graph.py 使用）
 safety_check_node = SafetyCheckNode()
 
-async def run(state: AgentState) -> dict:
-    return await safety_check_node.run(state)
+async def run(state: AgentState, config: RunnableConfig | None = None) -> dict:
+    return await safety_check_node.run(state, config)
 

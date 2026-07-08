@@ -13,6 +13,7 @@ import logging
 import time
 
 from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
 
@@ -81,7 +82,7 @@ class ReActLoopNode:
             )
         }
 
-    async def _direct_answer(self, state: AgentState) -> dict:
+    async def _direct_answer(self, state: AgentState, config: RunnableConfig) -> dict:
         """直接回答（不需要工具）"""
         chain = DIRECT_ANSWER_PROMPT | self.llm_no_tools
         start_time = time.time()
@@ -90,7 +91,9 @@ class ReActLoopNode:
             "user_input": state["user_input"],
             "long_term_memory": state.get("long_term_memory") or "暂无",
             "context_summary": state.get("context_summary") or "",
-        })
+            },
+            config=config,
+        )
         llm_elapsed = time.time() - start_time
 
         # 指标上报
@@ -106,7 +109,7 @@ class ReActLoopNode:
             "needs_tool": False,
         }
 
-    async def _rag_answer(self, state:AgentState) -> dict:
+    async def _rag_answer(self, state:AgentState, config: RunnableConfig) -> dict:
         """RAG 知识库回答"""
         if not state.get("rag_context"):
             logger.warning("[ReAct] RAG 上下文为空, 降级为直接回答")
@@ -120,7 +123,9 @@ class ReActLoopNode:
             "rag_context": state.get("rag_context", "暂无知识库上下文"),
             "long_term_memory": state.get("long_term_memory") or "暂无",
             "context_summary": state.get("context_summary") or "",
-        })
+            },
+            config=config,
+        )
         llm_elapsed = time.time() - start_time
 
         # 指标上报
@@ -136,7 +141,7 @@ class ReActLoopNode:
             "needs_tool": False,
         }
 
-    async def _react_think(self, state: AgentState) -> dict:
+    async def _react_think(self, state: AgentState, config: RunnableConfig) -> dict:
         """
         ReAct 推理主逻辑：
         调用绑定工具的 LLM，解析是否需要工具调用
@@ -157,11 +162,11 @@ class ReActLoopNode:
         chain = REACT_PROMPT | self.llm
 
         start_time = time.time()
-        response = await chain.ainvoke(self._build_react_prompt_vars(state))
+        response = await chain.ainvoke(self._build_react_prompt_vars(state), config=config)
         llm_elapsed = time.time() - start_time
 
         # 上报LLM推理时间
-        llm_call_duration.labels(models=settings.llm.model).observe(llm_elapsed)
+        llm_call_duration.labels(model=settings.llm.model).observe(llm_elapsed)
 
         # 上报Token用量（LangChain 的 usage_metadata）
         if hasattr(response, "usage_metadata") and response.usage_metadata:
@@ -220,7 +225,7 @@ class ReActLoopNode:
                 "iteration_count": iteration + 1,
             }
 
-    async def run(self, state: AgentState) -> dict:
+    async def run(self, state: AgentState, config: RunnableConfig) -> dict:
         route = state.get("route", RouteType.REACT)
 
         logger.info(
@@ -230,12 +235,12 @@ class ReActLoopNode:
 
         try:
             if route == RouteType.DIRECT:
-                return await self._direct_answer(state)
+                return await self._direct_answer(state, config)
             elif route == RouteType.RAG:
-                return await self._rag_answer(state)
+                return await self._rag_answer(state, config)
             else:
                 # REACT / HYBRID：走完整的 ReAct 循环
-                return await self._react_think(state)
+                return await self._react_think(state, config)
 
         except Exception as e:
             logger.error(f"[ReAct] 推理异常: {e}", exc_info=True)
@@ -248,6 +253,6 @@ class ReActLoopNode:
 
 react_loop_node = ReActLoopNode()
 
-async def run(state: AgentState) -> dict:
-    return await react_loop_node.run(state)
+async def run(state: AgentState, config: RunnableConfig) -> dict:
+    return await react_loop_node.run(state, config)
 

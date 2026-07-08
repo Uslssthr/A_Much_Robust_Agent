@@ -11,6 +11,7 @@ import time
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 
 from backend.agent.state import AgentState, RetrievedDoc
@@ -56,7 +57,7 @@ class RAGRetrieverNode:
             base_url=settings.llm.base_url,
         )
 
-    async def _rewrite_query(self, question: str) -> list[str]:
+    async def _rewrite_query(self, question: str, config: RunnableConfig | None = None) -> list[str]:
         """
         查询改写：将用户自然语言转为更适合检索的关键词查询
         同时生成多个查询变体以提升召回率（Multi-Query）
@@ -64,7 +65,9 @@ class RAGRetrieverNode:
         try:
             response = await self.llm.ainvoke([
                 HumanMessage(content=QUERY_REWRITE_PROMPT.format(question=question))
-            ])
+                ],
+                config=config,
+            )
             queries = [
                 q.strip()
                 for q in response.content.strip().split('\n')
@@ -78,7 +81,7 @@ class RAGRetrieverNode:
             logger.warning(f"[RAG] 查询改写失败：{e}， 使用原始问题")
             return [question]
 
-    async def run(self, state: AgentState) -> dict:
+    async def run(self, state: AgentState, config: RunnableConfig) -> dict:
         user_input = state["user_input"]
         collection = state.get("collection", "default")     # 可从 state 传入
         start_time = time.time()
@@ -86,7 +89,7 @@ class RAGRetrieverNode:
         logger.info(f"[RAGNode] session={state['session_id']} query={user_input[:50]}")
 
         # 1. 查询改写（Multi-Query）
-        queries = await self._rewrite_query(user_input)
+        queries = await self._rewrite_query(user_input, config=config)
         logger.info(f"[RAGNode] rewritten queries: {queries}")
 
         # 2. 多查询并行检索 + 合并
@@ -152,7 +155,7 @@ class RAGRetrieverNode:
 
 rag_retriever_node = RAGRetrieverNode()
 
-async def run(state: AgentState) -> dict:
-    return await rag_retriever_node.run(state)
+async def run(state: AgentState, config: RunnableConfig) -> dict:
+    return await rag_retriever_node.run(state, config)
 
 

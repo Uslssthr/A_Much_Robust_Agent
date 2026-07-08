@@ -4,6 +4,7 @@ import json
 import logging
 import re
 
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from backend.agent.prompts import ROUTER_PROMPT
@@ -84,7 +85,7 @@ class RouterNode:
             return RouteType.REACT, "解析异常", 0.5
 
 
-    async def run(self, state: AgentState) -> dict:
+    async def run(self, state: AgentState, config: RunnableConfig) -> dict:
         user_input = state["user_input"]
         long_term_memory = state["long_term_memory"] or "暂无长期记忆"
 
@@ -104,7 +105,9 @@ class RouterNode:
                 "messages": list(state["messages"]),
                 "user_input": user_input,
                 "long_term_memory": long_term_memory,
-            })
+                },
+                config=config,
+            )
             route, reasoning, confidence = self._parse_llm_response(response.content)
 
             logger.info(
@@ -134,6 +137,6 @@ class RouterNode:
 
 router_node = RouterNode()
 
-async def run(state: AgentState) -> dict:
-    return await router_node.run(state)
+async def run(state: AgentState, config: RunnableConfig) -> dict:
+    return await router_node.run(state, config)
 

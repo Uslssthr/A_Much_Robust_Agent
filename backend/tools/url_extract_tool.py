@@ -6,9 +6,9 @@ from typing import ClassVar, Literal, Any
 import httpx
 from pydantic import BaseModel, Field
 
-from tools.base_tool import BaseAgentTool
-from tools.search_tool import _get_httpx_version   # ✅ 复用版本检测
-from config import settings
+from backend.tools.base_tool import BaseAgentTool
+from backend.tools.search_tool import _get_httpx_version   # ✅ 复用版本检测
+from backend.config import settings
 
 logger = logging.getLogger(__name__)
 TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"

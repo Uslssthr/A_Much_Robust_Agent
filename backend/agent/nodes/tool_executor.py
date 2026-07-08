@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Optional
 
 from langchain_core.messages import ToolMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool
 
 from backend.agent.state import AgentState, ToolCall
@@ -35,6 +36,7 @@ class ToolExecutorNode:
             self,
             tool: BaseTool,
             args: dict,
+            config: RunnableConfig,
     ) -> tuple[str, Optional[str]]:
         """
         执行工具，带超时控制
@@ -46,7 +48,7 @@ class ToolExecutorNode:
             # 带超时的异步执行
             if hasattr(tool, 'arun'):
                 result = await asyncio.wait_for(
-                    tool.arun(args),
+                    tool.arun(args, config=config),
                     timeout=self.timeout,
                 )
             else:
@@ -80,7 +82,7 @@ class ToolExecutorNode:
             tool_calls_total.labels(tool=tool.name, status=status).inc()
             tool_duration.labels(tool=tool.name).observe(elapsed)
 
-    async def run(self, state: AgentState) -> dict:
+    async def run(self, state: AgentState, config: RunnableConfig) -> dict:
         pending = state.get("pending_tool")
 
         # 没有待执行工具
@@ -109,7 +111,7 @@ class ToolExecutorNode:
             elapsed_ms = 0.0
         else:
             # 2. 执行
-            tool_output, error = await self._execute_tool(tool, tool_args)
+            tool_output, error = await self._execute_tool(tool, tool_args, config)
             elapsed_ms = (time.time() - start_time) * 1e3
 
         logger.info(
@@ -151,5 +153,5 @@ class ToolExecutorNode:
 
 tool_executor_node = ToolExecutorNode()
 
-async def run(state: AgentState) -> dict:
-    return await tool_executor_node.run(state)
+async def run(state: AgentState, config: RunnableConfig) -> dict:
+    return await tool_executor_node.run(state, config)

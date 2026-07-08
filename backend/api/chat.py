@@ -60,6 +60,10 @@ def _sse(event_type: str, data: dict) -> str:
 def _sse_token(content: str) -> str:
     return _sse("token", {"content": content})
 
+def _sse_thinking(stage: str) -> str:
+    """告诉前端当前处于哪个阶段（路由/检索/推理）"""
+    return _sse("thinking", {"stage": stage})
+
 def _sse_tool_start(tool: str, args:dict) -> str:
     return _sse("tool_start", {"tool": tool, "args": args})
 
@@ -77,6 +81,10 @@ def _sse_meta(session_id: str, route: str, iteration: int, overflow: bool) -> st
         "iteration": iteration,
         "compressed": overflow,
     })
+
+def _sse_final(content: str) -> str:
+    """权威的最终完整回答，前端收到后直接覆盖 content"""
+    return _sse("final", {"content": content})
 
 def _sse_error(msg: str) -> str:
     return _sse("error", {"message": msg})
@@ -147,6 +155,7 @@ async def chat(req: ChatRequest, request: Request):
         user_input=req.message,
         session_id=session_id,
         user_id=req.user_id,
+        collection=req.collection,
     )
     if long_memory_text:
         init_state["long_term_memory"] = long_memory_text
@@ -161,7 +170,8 @@ async def chat(req: ChatRequest, request: Request):
     async def event_generator():
         full_answer = []
         tool_calls_log = []
-        final_state = {}
+
+        yield _sse_thinking("正在分析问题...")
 
         try:
             # 使用 astream_events 获取细粒度事件流
@@ -182,6 +192,9 @@ async def chat(req: ChatRequest, request: Request):
                         full_answer.append(token)
                         yield _sse_token(token)
 
+                elif kind == "on_chain_start" and name == "rag_retrieve":
+                    yield _sse_thinking("正在检索知识库...")
+
                 # 工具开始执行
 
                 elif kind == "on_tool_start":
@@ -191,6 +204,7 @@ async def chat(req: ChatRequest, request: Request):
                         "args": tool_input,
                         "start": datetime.utcnow().isoformat(),
                     })
+                    yield _sse_thinking(f"正在调用工具 {name}...")
                     yield _sse_tool_start(name, tool_input)
 
                 # 工具执行完成
@@ -208,11 +222,8 @@ async def chat(req: ChatRequest, request: Request):
                     else:
                         elapsed_ms = -1
                     yield _sse_tool_end(name, output, elapsed_ms)
+                    yield _sse_thinking("正在推理...")
 
-                # 图运行结束，读取最终状态
-
-                elif kind == "on_chain_end" and name == "LangGraph":
-                    final_state = event["data"].get("output", {})
 
         except asyncio.CancelledError:
             logger.info(f"[Chat] 客户端断开连接：session_id={session_id}")
@@ -226,9 +237,22 @@ async def chat(req: ChatRequest, request: Request):
             active_sessions.dec()           # 活跃会话 -1
 
         # 流结束后的后处理
+        yield _sse_thinking("正在生成最终回答...")
+        final_state: dict = {}
+        try:
+            snapshot = await agent.aget_state(config)
+            if snapshot:
+                final_state = snapshot.values
+        except Exception as e:
+            logger.error(f"[Chat] 读取最终状态异常：{e}", exc_info=True)
 
-        answer = "".join(full_answer) or final_state.get("final_answer", "")
+        streamed_text = "".join(full_answer)
+        real_answer = final_state.get("final_answer") or streamed_text
         route = str(final_state.get("route", "unknown"))
+        if real_answer:
+            yield _sse_final(real_answer)
+
+
         route_distribution.labels(route=route).inc()
         agent_requests_total.labels(route=route, status="success").inc()
 
@@ -241,11 +265,11 @@ async def chat(req: ChatRequest, request: Request):
         )
 
         # 保存助手回复到 SQLite
-        if answer:
+        if real_answer:
             db.save_message(
                 session_id=session_id,
                 role="assistant",
-                content=answer,
+                content=real_answer,
             )
 
         # 保存工具调用日志
@@ -266,7 +290,7 @@ async def chat(req: ChatRequest, request: Request):
                 user_id=req.user_id,
                 session_id=session_id,
                 user_input=req.message,
-                assistant_response=answer,
+                assistant_response=real_answer,
             )
         except Exception as e:
             logger.warning(f"[Chat] 记忆提取任务提交失败: {e}")
@@ -299,6 +323,7 @@ async def chat_sync(req: ChatRequest, request: Request):
         user_input=req.message,
         session_id=session_id,
         user_id=req.user_id,
+        collection=req.collection,
     )
     long_memory = long_term_memory.recall_as_text(req.user_id)
     if long_memory:

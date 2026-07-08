@@ -14,6 +14,7 @@ import logging
 import tiktoken
 from deepseek_tokenizer import ds_token
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_openai import ChatOpenAI
 
 from backend.agent.prompts import SUMMARIZATION_PROMPT
@@ -113,7 +114,7 @@ class ContextManagerNode:
 
     # 策略 3： 摘要压缩
     async def _summarize_compress(
-            self, messages: list[BaseMessage]
+            self, messages: list[BaseMessage], config: RunnableConfig | None = None
     ) -> tuple[list[BaseMessage], str, str]:
         """
         摘要前 N 条消息，保留最近 keep_last_n 条
@@ -131,7 +132,10 @@ class ContextManagerNode:
         # 调用 LLM 生成摘要
         history_text = self._msg_to_text(old_msgs)
         chain = SUMMARIZATION_PROMPT | self.llm
-        response = await chain.ainvoke({"history_text": history_text})
+        response = await chain.ainvoke(
+            {"history_text": history_text},
+            config=config,
+        )
         summary = response.content
 
         # 将摘要注入为 System 消息
@@ -149,7 +153,7 @@ class ContextManagerNode:
 
     # 策略 4： Focus 折叠（强制）
     async def _focus_fold(
-            self, messages: list[BaseMessage]
+            self, messages: list[BaseMessage], config: RunnableConfig | None = None
     ) -> tuple[list[BaseMessage], str, str]:
         """
         将所有旧消息折叠，只保留最近 keep_last_n 条
@@ -161,11 +165,11 @@ class ContextManagerNode:
         )
         # 调用摘要压缩（keep_last_n 减半，更激进）
         self.keep_last_n = max(2, self.keep_last_n // 2)
-        result, strategy, summary = await self._summarize_compress(messages)
+        result, strategy, summary = await self._summarize_compress(messages, config=config)
         self.keep_last_n = settings.context.keep_last_n     # 恢复
         return result, "focus_fold", summary
 
-    async def run(self, state: AgentState) -> dict:
+    async def run(self, state: AgentState, config: RunnableConfig) -> dict:
         messages = list(state["messages"])
         token_count = self._count_tokens(messages)
 
@@ -192,12 +196,12 @@ class ContextManagerNode:
 
         elif token_count < self.max_limit:
             # 摘要压缩
-            messages, strategy, summary = await self._summarize_compress(messages)
+            messages, strategy, summary = await self._summarize_compress(messages, config=config)
             overflow = True
 
         else:
             # Focus 折叠（强制）
-            messages, strategy, summary = await self._focus_fold(messages)
+            messages, strategy, summary = await self._focus_fold(messages, config=config)
             overflow = True
 
         # 上报压缩策略指标（none 不上报，只关心真正发生压缩的情况）
@@ -218,6 +222,6 @@ class ContextManagerNode:
 
 context_manager_node = ContextManagerNode()
 
-async def run(state: AgentState) -> dict:
-    return await context_manager_node.run(state)
+async def run(state: AgentState, config: RunnableConfig) -> dict:
+    return await context_manager_node.run(state, config)
 

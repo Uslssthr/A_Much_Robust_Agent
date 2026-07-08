@@ -96,6 +96,7 @@ def create_initial_state(
         user_input: str,
         session_id: str,
         user_id:    str = "anonymous",
+        collection: str = "default",
 ) -> AgentState:
     """构造初始状态，所有字段给予安全默认值"""
     return AgentState(
@@ -103,6 +104,7 @@ def create_initial_state(
         user_id=user_id,
         user_input=user_input,
         messages=[],
+        collection=collection,
         safety_passed=False,
         safety_reason=None,
         safety_level=SafetyLevel.NONE,
